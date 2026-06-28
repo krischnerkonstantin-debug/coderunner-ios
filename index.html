@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>runbox</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d1117; }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useRef, useCallback } = React;
+
+const LANG_PRESETS = [
+  { label: "Python", language: "python", version: "3.10.0", ext: "py" },
+  { label: "JavaScript", language: "javascript", version: "18.15.0", ext: "js" },
+  { label: "Java", language: "java", version: "15.0.2", ext: "java" },
+  { label: "C++", language: "cpp", version: "10.2.0", ext: "cpp" },
+  { label: "C", language: "c", version: "10.2.0", ext: "c" },
+  { label: "TypeScript", language: "typescript", version: "5.0.3", ext: "ts" },
+  { label: "Go", language: "go", version: "1.16.2", ext: "go" },
+  { label: "Rust", language: "rust", version: "1.68.2", ext: "rs" },
+  { label: "Ruby", language: "ruby", version: "3.0.1", ext: "rb" },
+  { label: "PHP", language: "php", version: "8.2.3", ext: "php" },
+];
+
+const STARTER = {
+  python: 'print("hello from python")\n',
+  javascript: 'console.log("hello from javascript");\n',
+  java: 'public class Main {\n  public static void main(String[] args) {\n    System.out.println("hello from java");\n  }\n}\n',
+  cpp: '#include <iostream>\nint main() {\n  std::cout << "hello from c++" << std::endl;\n  return 0;\n}\n',
+  c: '#include <stdio.h>\nint main() {\n  printf("hello from c\\n");\n  return 0;\n}\n',
+  typescript: 'const msg = "hello from typescript";\nconsole.log(msg);\n',
+  go: 'package main\nimport "fmt"\nfunc main() {\n  fmt.Println("hello from go")\n}\n',
+  rust: 'fn main() {\n  println!("hello from rust");\n}\n',
+  ruby: 'puts "hello from ruby"\n',
+  php: '<?php\necho "hello from php\\n";\n',
+};
+
+let fileId = 1;
+function newFile(preset) {
+  return {
+    id: fileId++,
+    name: `main.${preset.ext}`,
+    language: preset.language,
+    version: preset.version,
+    code: STARTER[preset.language] || "",
+  };
+}
+
+function CodeRunner() {
+  const [files, setFiles] = useState(() => [newFile(LANG_PRESETS[0])]);
+  const [activeId, setActiveId] = useState(() => files[0].id);
+  const [output, setOutput] = useState("");
+  const [running, setRunning] = useState(false);
+  const [status, setStatus] = useState(null);
+  const taRef = useRef(null);
+
+  const active = files.find((f) => f.id === activeId) || files[0];
+
+  const updateActive = useCallback((patch) => {
+    setFiles((fs) => fs.map((f) => (f.id === active.id ? { ...f, ...patch } : f)));
+  }, [active.id]);
+
+  const addFile = () => {
+    const f = newFile(LANG_PRESETS[0]);
+    setFiles((fs) => [...fs, f]);
+    setActiveId(f.id);
+  };
+
+  const closeFile = (id, e) => {
+    e.stopPropagation();
+    setFiles((fs) => {
+      const remaining = fs.filter((f) => f.id !== id);
+      if (remaining.length === 0) {
+        const f = newFile(LANG_PRESETS[0]);
+        setActiveId(f.id);
+        return [f];
+      }
+      if (id === activeId) setActiveId(remaining[0].id);
+      return remaining;
+    });
+  };
+
+  const changeLanguage = (label) => {
+    const preset = LANG_PRESETS.find((p) => p.label === label);
+    if (!preset) return;
+    updateActive({
+      language: preset.language,
+      version: preset.version,
+      name: active.name.replace(/\.[a-z0-9+]+$/i, "." + preset.ext),
+      code: active.code.trim() === "" ? STARTER[preset.language] || "" : active.code,
+    });
+  };
+
+  const run = async () => {
+    setRunning(true);
+    setStatus(null);
+    setOutput("Running…");
+    try {
+      const res = await fetch("https://emkc.org/api/v2/piston/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          language: active.language,
+          version: active.version,
+          files: [{ name: active.name, content: active.code }],
+        }),
+      });
+      if (!res.ok) throw new Error(`Server responded ${res.status}`);
+      const data = await res.json();
+      const run = data.run || {};
+      const compile = data.compile || {};
+      let text = "";
+      if (compile.stderr) text += `[compile error]\n${compile.stderr}\n`;
+      if (run.stdout) text += run.stdout;
+      if (run.stderr) text += (text ? "\n" : "") + run.stderr;
+      if (!text.trim()) text = "(no output)";
+      setOutput(text);
+      setStatus(run.code === 0 && !compile.stderr ? "ok" : "error");
+    } catch (err) {
+      setOutput("Couldn't reach the execution service. Check your connection and try again.\n\n" + String(err.message || err));
+      setStatus("error");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const onKeyDown = (e) => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const ta = taRef.current;
+      const start = ta.selectionStart;
+      const end = ta.selectionEnd;
+      const next = active.code.slice(0, start) + "  " + active.code.slice(end);
+      updateActive({ code: next });
+      requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = start + 2; });
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      run();
+    }
+  };
+
+  const lineCount = active.code.split("\n").length;
+  const lines = Array.from({ length: lineCount }, (_, i) => i + 1);
+
+  const s = {
+    app: { height: "100vh", width: "100%", background: "#0d1117", color: "#c9d1d9", display: "flex", flexDirection: "column", fontFamily: "ui-monospace, Menlo, monospace" },
+    topbar: { display: "flex", alignItems: "center", gap: 12, padding: "8px 12px", background: "#161b22", borderBottom: "1px solid #30363d" },
+    title: { fontSize: 14, fontWeight: 600, color: "#e6edf3" },
+    select: { background: "#0d1117", border: "1px solid #30363d", borderRadius: 6, padding: "4px 8px", fontSize: 12, color: "#c9d1d9" },
+    runBtn: (disabled) => ({ display: "flex", alignItems: "center", gap: 6, background: "#238636", opacity: disabled ? 0.6 : 1, color: "white", fontSize: 12, fontWeight: 600, padding: "6px 12px", borderRadius: 6, border: "none", cursor: disabled ? "default" : "pointer" }),
+    tabs: { display: "flex", alignItems: "center", background: "#0d1117", borderBottom: "1px solid #30363d", overflowX: "auto" },
+    tab: (activeTab) => ({ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", fontSize: 12, borderRight: "1px solid #30363d", cursor: "pointer", flexShrink: 0, background: activeTab ? "#161b22" : "transparent", color: activeTab ? "#e6edf3" : "#7d8590" }),
+    addBtn: { padding: "6px 10px", color: "#7d8590", background: "none", border: "none", cursor: "pointer", fontSize: 14 },
+    editorWrap: { flex: 1, display: "flex", overflow: "hidden", minHeight: 0 },
+    gutter: { userSelect: "none", textAlign: "right", color: "#484f58", fontSize: 13, lineHeight: 1.6, padding: "12px 8px", background: "#0d1117" },
+    textarea: { flex: 1, background: "#0d1117", color: "#c9d1d9", fontSize: 13, lineHeight: 1.6, padding: "12px 12px 12px 0", outline: "none", resize: "none", border: "none", fontFamily: "ui-monospace, Menlo, monospace", whiteSpace: "pre" },
+    outputWrap: { height: "30%", minHeight: 120, borderTop: "1px solid #30363d", background: "#0d1117", display: "flex", flexDirection: "column", flexShrink: 0 },
+    outputHeader: { display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", background: "#161b22", borderBottom: "1px solid #30363d", fontSize: 12, color: "#7d8590" },
+    dot: (color) => ({ width: 7, height: 7, borderRadius: 99, background: color }),
+    pre: { flex: 1, overflow: "auto", padding: "8px 12px", fontSize: 13, lineHeight: 1.5, color: "#c9d1d9", whiteSpace: "pre-wrap", margin: 0 },
+  };
+
+  const dotColor = status === "ok" ? "#3fb950" : status === "error" ? "#f85149" : "#484f58";
+
+  return (
+    <div style={s.app}>
+      <div style={s.topbar}>
+        <span style={s.title}>runbox</span>
+        <div style={{ flex: 1 }} />
+        <select style={s.select} value={LANG_PRESETS.find(p => p.language === active.language)?.label} onChange={(e) => changeLanguage(e.target.value)}>
+          {LANG_PRESETS.map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
+        </select>
+        <button style={s.runBtn(running)} onClick={run} disabled={running}>▶ Run</button>
+      </div>
+
+      <div style={s.tabs}>
+        {files.map((f) => (
+          <div key={f.id} style={s.tab(f.id === activeId)} onClick={() => setActiveId(f.id)}>
+            <span>{f.name}</span>
+            {files.length > 1 && <span onClick={(e) => closeFile(f.id, e)} style={{ cursor: "pointer" }}>✕</span>}
+          </div>
+        ))}
+        <button style={s.addBtn} onClick={addFile}>+</button>
+      </div>
+
+      <div style={s.editorWrap}>
+        <div style={s.gutter}>{lines.map((n) => <div key={n}>{n}</div>)}</div>
+        <textarea
+          ref={taRef}
+          value={active.code}
+          onChange={(e) => updateActive({ code: e.target.value })}
+          onKeyDown={onKeyDown}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          style={s.textarea}
+        />
+      </div>
+
+      <div style={s.outputWrap}>
+        <div style={s.outputHeader}><span style={s.dot(dotColor)} />output</div>
+        <pre style={s.pre}>{output || "Run your code to see output here."}</pre>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<CodeRunner />);
+</script>
+</body>
+</html>
